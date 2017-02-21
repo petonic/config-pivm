@@ -1,0 +1,162 @@
+#!/usr/bin/env python3
+# -*- grammar-ext: py -*-
+#
+"""mif
+
+Usage:
+    mif [-u] [-m] -p partNum <imgfile> <mountdir>
+    mif [-u] [-m] <imgfile> (-1|-2|-3|-4|-5|-6|-7|-8|-9) <mountdir>
+
+
+Options:
+    -h --help       Show this screen.
+    -p partNum      Specifies the partition number, cannot be used with
+                    "-{1..6}" option style.
+    -(1|2|3|4|5|6)  Specifies that the nth partition on the disk will be mounted
+                    on the <mountdir> directory.  At this time, cannot
+                    specify more than one partition.
+    -u              Forces an unmount of the directory if necessary
+    -m              Makes the mountpoint directory if it's not present.
+
+Utility calculates the starting offset for the specified partition using
+fdisk -l, and then mounts the .IMG file's partition N on to the specified
+mountdir directory.
+"""
+
+# fdisk -l -->
+#
+# Device                            Boot  Start      End  Sectors  Size Id Type
+# SDImages/karenspi-2017-01-22.iso1        8192   137215   129024   63M  c W95 FAT3
+# SDImages/karenspi-2017-01-22.iso2      137216 15597567 15460352  7.4G 83 Linux
+
+const_sectorSize = 512
+const_maxPart = 6       # Tied into the -1 to -6 spread in the CLI options.
+
+import sys
+import subprocess
+from docopt import docopt
+
+# Make this a global variable
+args = None
+
+def main():
+    global args            # Use the global so main can see it
+    sPartNum = 0
+
+    imgfileName = args['<imgfile>']
+    mountdirName = args['<mountdir>']
+    if args['-p']:
+        argStr = args['-p']
+        try:
+            partNum = int(argStr)
+        except ValueError:
+            print("partNum must be an integer <= 9: <%s>"%argStr,
+                  file=sys.stderr)
+            sys.exit(1)
+        if partNum < 0 or partNum > 9:
+            print("partNum must be an integer <= 9: <%s>"%argStr,
+                  file=sys.stderr)
+            sys.exit(1)
+    else:
+        # Loop through the -X arguments to find one.
+        for i in range(1,const_maxPart):
+            keyString = '-%d'%i
+            if args[keyString]:
+                sPartNum = i
+                break
+    # Check for errors in specifying the partNum through either method
+    if (((sPartNum > 0) and args['-p']) or
+        ((sPartNum == 0) and not args['-p'])):
+        printf("Exactly and only one partition can be specified" +
+               " at this time.", file=sys.stderr)
+        sys.exit(1)
+    if sPartNum > 0:
+        partNum = sPartNum
+    # Debug #########################################
+    if (False):
+        print("imgfile: %s"%repr(imgfileName))
+        print("mountpoint: %s"%repr(mountdirName))
+        print("Part num: %d"%partNum)
+    # Now, do the math and the mount:
+    import subprocess
+    fdiskoutput = subprocess.check_output(['fdisk', '-l', imgfileName])
+    lines = fdiskoutput.decode("utf-8").split('\n')
+    # Chop off all header lines
+    while len(lines):
+        currLine = lines.pop(0)
+        if currLine.startswith("Device"):
+            break
+    if not len(lines):
+        print("Error in output of fdisk -l...",file=sys.stderr)
+        sys.exit(6)
+    #DBG# print("== Remainder output is: ")  #DBG#
+    #DBG# from pprint import pprint           #DBG#
+    #DBG# pprint(lines)                          #DBG#
+    #DBG# print("== (END) Remainder output is: ")  #DBG#
+    # Strip off the matching chars of the imagename and you'll be left
+    # with a list of partitions and its data:
+    # (not included:
+    # partNum  Start      End  Sectors  Size Id Type)
+    #
+    # 1        8192   137215   129024   63M  c W95 FAT3
+    # 2      137216 15597567 15460352  7.4G 83 Linux
+    #DBG# print("partnum = ", partNum)
+    #DBG# print("Selected partition is: <%s>"%lines[partNum-1])
+    # Strip off the filename from the front.
+    # print("imgfileName is %s"%repr(imgfileName))
+    statLine = lines[partNum-1][len(imgfileName):]
+    # print("== strip prefix, orig = %s, new = %s"%(repr(lines[partNum-1]),
+                                                #   statLine)) #DBG#
+    # print("statLine = %s, imgfileName = %s"%(repr(statLine), repr(imgfileName))) #DBG#
+    # Sort by fields, and the second field ([1]) is the start
+    statArr = statLine.split()
+    # print("statArr = %s"%repr(statArr))   #DBG#
+    startSec = statLine.split()[1]
+    startBytes = int(startSec) * const_sectorSize
+    # print("Start sector number is %d, offset is %d (* %d)"%(
+    #   int(startSec), int(startSec) * const_sectorSize,
+    #    const_sectorSize))
+    ## sudo mount -v -o offset=70254592 -t ext4 ~/host/SDImages/karenspi-2017-01-22.iso /mnt1
+
+    # If -u flag is set, unmount the directory while ignoring errors
+    import shlex
+    if args['-u']:
+        # cmdArr = ['sudo', 'umount', '-d', mountdirName]
+        subprocess.call('sudo umount -d %s >/dev/null 2>&1'%
+                        shlex.quote(mountdirName), shell=True)
+    if args['-m']:
+        # If -m flag is set, mkdir the specified mountpoint, ignore errors
+        subprocess.call('mkdir %s >/dev/null 2>&1'%shlex.quote(mountdirName),
+                        shell=True)
+
+    cmdStr='sudo mount -v -o offset=%d -t ext4 %s %s'%(
+            startBytes,shlex.quote(imgfileName), shlex.quote(mountdirName))
+
+    # cmdArr = ['sudo', 'mount', '-v', '-o', 'offset=%d'%startBytes,
+    #              '-t', 'ext4', imgfileName, mountdirName]
+    print(cmdStr)
+
+    retval = subprocess.call(cmdStr, shell=True)
+    if not retval:
+        print("Mounted %s to mountpoint %s"%(shlex.quote(imgfileName),
+              shlex.quote(mountdirName)))
+    else:
+        print("Error doing mount of %s to %s"%(shlex.quote(imgfileName),
+              shlex.quote(mountdirName)), file=sys.stderr)
+        sys.exit(99)
+
+
+
+if __name__ == '__main__':
+    args = docopt(__doc__, version='mif v1.0')
+
+    main()
+
+    # from bdb import BdbQuit
+    # try:
+    #     main()
+    # except (BdbQuit,KeyboardInterrupt):
+    #     sys.exit(0)
+    # except:
+    #     import pdb;
+    #     pdb.xpm()
